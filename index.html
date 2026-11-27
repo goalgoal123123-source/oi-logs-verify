@@ -55,7 +55,8 @@ async function holdersYes(cond){
   const fromB = est(Date.parse(FROM_ISO)/1000), toB = latest;
   log('終身窗口：'+FROM_ISO+' → 而家，區塊 '+fromB+' → '+toB+'（約 '+(toB-fromB)+' 區塊）');
   let sSum=0, mSum=0, sN=0, mN=0, chunks=0, fails=0;
-  async function acc(logs, isSplit){ for(const l of logs){ if((l.topics[3]||'').toLowerCase()===TT){ const amt=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; if(isSplit){ sSum+=amt; sN++; } else { mSum+=amt; mN++; } } } }
+  const evs=[];
+  async function acc(logs, isSplit){ for(const l of logs){ if((l.topics[3]||'').toLowerCase()===TT){ const amt=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; evs.push({split:isSplit, blk:parseInt(l.blockNumber,16), tx:l.transactionHash, w:(l.topics[1]||'').toLowerCase(), amt}); if(isSplit){ sSum+=amt; sN++; } else { mSum+=amt; mN++; } } } }
   async function scanRange(a,b){ const [x,y]=await Promise.all([getLogs(SPLIT,a,b),getLogs(MERGE,a,b)]); await acc(x,true); await acc(y,false); }
   for(let s=fromB; s<=toB; s+=10000){
     const e=Math.min(s+9999,toB);
@@ -85,6 +86,16 @@ async function holdersYes(cond){
   log('對照 No：鏈上終身淨 '+net.toFixed(2)+' 股 vs holders No 總數 '+noTot.toFixed(2)+' 股，誤差 '+errN.toFixed(2)+' 股（'+(noTot?(errN/noTot*100).toFixed(2)+'%':'n/a')+'）', Math.abs(errN)/Math.max(noTot,1)<0.03?'ok':'warn');
   if(Math.abs(errY)/Math.max(yesTot,1)<0.03 && Math.abs(errN)/Math.max(noTot,1)<0.03) log('✓ 終身對照通過：鏈上 logs 計出嘅總 OI 同 holders 兩邊總數都吻合，方法證實可用','ok');
   else log('✗ 終身對照唔吻合（注意：已結算市場贖回會燒走股份，終身對照只適用於未結算市場）','bad');
+  if(P.get('mode')==='events'){
+    log('--- 逐筆事件（按金額由大到細，頭 20 筆）---');
+    const big=[...evs].sort((a,b)=>b.amt-a.amt).slice(0,20);
+    for(const e of big) log((e.split?'SPLIT ':'MERGE ')+'blk '+e.blk+' 錢包 '+e.w.slice(0,10)+'…'+e.w.slice(-4)+' '+e.amt.toFixed(2)+' 股 tx '+e.tx.slice(0,14)+'…');
+    log('--- 每錢包淨額（split − merge，由大到細，頭 20 個）---');
+    const wm={};
+    for(const e of evs){ const o=wm[e.w]||(wm[e.w]={s:0,m:0}); if(e.split) o.s+=e.amt; else o.m+=e.amt; }
+    const wl=Object.entries(wm).map(([w,o])=>({w, net:o.s-o.m, s:o.s, m:o.m})).sort((a,b)=>b.net-a.net).slice(0,20);
+    for(const r of wl) log('錢包 '+r.w.slice(0,10)+'…'+r.w.slice(-4)+' split '+r.s.toFixed(2)+' merge '+r.m.toFixed(2)+' 淨 '+r.net.toFixed(2)+' 股');
+  }
   log('--- 完成 ---');
 })();
 </script>
