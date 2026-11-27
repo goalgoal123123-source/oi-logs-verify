@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OI 鏈上 logs 驗證 v5</title>
+<style>body{background:#111;color:#eee;font-family:monospace;padding:16px;white-space:pre-wrap;word-break:break-word}h1{font-size:18px}.ok{color:#4ade80}.bad{color:#f87171}.warn{color:#facc15}</style>
+</head><body>
+<h1>OI 鏈上 logs 驗證 v5（TT 市場終身對照）</h1>
+<div id="out">執行緊…</div>
+<script>
+const TT = '0xe6bbe646de3871b22c4a8dcf265669e18efe855527671d437d862030612ee513'; // Texas Tech vs Oregon 籃球主盤
+const CTF = '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045';
+const SPLIT = '0x2e6bb91f8cbcda0c93623c54d0403a43514fabc40084ec96b6d5379a74786298';
+const MERGE = '0x6f13ca62553fcc2bcd2372180a43949c1e4cebba603901ede2f4e14f36b282ca';
+const RPCS = ['https://polygon-bor.publicnode.com','https://polygon.llamarpc.com','https://rpc.ankr.com/polygon','https://1rpc.io/matic','https://polygon.drpc.org','https://polygon-rpc.com'];
+const out = document.getElementById('out');
+const lines = [];
+function log(s, cls){ lines.push(cls ? '<span class="'+cls+'">'+s+'</span>' : s); out.innerHTML = lines.join('\n'); }
+const sleep = ms => new Promise(r=>setTimeout(r,ms));
+async function rpcOne(url, method, params, timeoutMs){
+  const c = new AbortController(); const t = setTimeout(()=>c.abort(), timeoutMs||20000);
+  try{
+    const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({jsonrpc:'2.0', id:1, method, params}), signal:c.signal});
+    clearTimeout(t);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const j = await r.json();
+    if(j.error) throw new Error('RPC err: '+JSON.stringify(j.error));
+    return j.result;
+  }catch(e){ clearTimeout(t); throw e; }
+}
+async function rpc(method, params, timeoutMs){
+  let lastErr=null;
+  for(const u of RPCS){ try{ return await rpcOne(u, method, params, timeoutMs); } catch(e){ lastErr=e; } }
+  throw lastErr||new Error('all RPCs failed');
+}
+async function getLogs(topic, fromB, toB){
+  return await rpc('eth_getLogs', [{address: CTF, fromBlock:'0x'+fromB.toString(16), toBlock:'0x'+toB.toString(16), topics:[topic]}], 30000);
+}
+async function holdersYes(cond){
+  const r = await fetch('https://data-api.polymarket.com/v2/holders?condition='+cond+'&limit=1000');
+  const j = await r.json(); const arr = Array.isArray(j)?j:(j.data||[]);
+  return arr.map(g=>{ let t=0; for(const x of (g.holders||[])) t+=parseFloat(x.amount||0); return {n:(g.holders||[]).length, tot:t}; });
+}
+(async ()=>{
+  try{ const b = await rpc('eth_blockNumber', [], 8000); log('RPC 通，最新區塊 '+parseInt(b,16),'ok'); }
+  catch(e){ log('全部 RPC 都唔通：'+e.message,'bad'); return; }
+  const latest = parseInt(await rpc('eth_blockNumber',[]),16);
+  const blk = await rpc('eth_getBlockByNumber',['latest',false]);
+  const nowTs = parseInt(blk.timestamp,16);
+  log('最新區塊 '+latest+'，時間 '+new Date(nowTs*1000).toLocaleString('zh-HK',{timeZone:'Asia/Hong_Kong'}));
+  const est = t => Math.round(latest-(nowTs-t)/2.05);
+  // 市場上架時間約 2026-11-25 07:23 UTC（event startDate）；由 11-25 00:00 UTC 開始掃，留 7 小時 margin
+  const fromB = est(Date.UTC(2026,10,25,0,0,0)/1000), toB = latest;
+  log('終身窗口：2026-11-25 00:00 UTC → 而家，區塊 '+fromB+' → '+toB+'（約 '+(toB-fromB)+' 區塊）');
+  let sSum=0, mSum=0, sN=0, mN=0, chunks=0, fails=0;
+  for(let s=fromB; s<=toB; s+=2000){
+    const e=Math.min(s+1999,toB);
+    try{
+      const [a,b]=await Promise.all([getLogs(SPLIT,s,e),getLogs(MERGE,s,e)]);
+      for(const l of a){ if((l.topics[3]||'').toLowerCase()===TT){ sSum+=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; sN++; } }
+      for(const l of b){ if((l.topics[3]||'').toLowerCase()===TT){ mSum+=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; mN++; } }
+    }catch(err){
+      // 2000 區塊失敗，拆細兩段 1000 再試
+      try{
+        const mid=Math.floor((s+e)/2);
+        const [a1,b1]=await Promise.all([getLogs(SPLIT,s,mid),getLogs(MERGE,s,mid)]);
+        const [a2,b2]=await Promise.all([getLogs(SPLIT,mid+1,e),getLogs(MERGE,mid+1,e)]);
+        for(const l of a1.concat(a2)){ if((l.topics[3]||'').toLowerCase()===TT){ sSum+=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; sN++; } }
+        for(const l of b1.concat(b2)){ if((l.topics[3]||'').toLowerCase()===TT){ mSum+=Number(BigInt('0x'+l.data.slice(130,194)))/1e6; mN++; } }
+      }catch(err2){ fails++; log('  段 '+s+'-'+e+' 失敗（拆細都唔得）：'+err2.message,'bad'); }
+    }
+    chunks++;
+    if(chunks%10===0) log('  進度 '+chunks+' 段：累計 split '+sN+' 筆 '+sSum.toFixed(2)+' 股；merge '+mN+' 筆 '+mSum.toFixed(2)+' 股');
+    await sleep(300);
+  }
+  log('掃完：split '+sN+' 筆，共 '+sSum.toFixed(2)+' 股；merge '+mN+' 筆，共 '+mSum.toFixed(2)+' 股；失敗段數 '+fails);
+  const net = sSum - mSum;
+  log('終身淨 ΔOI（split − merge）= '+net.toFixed(2)+' 股');
+  const h = await holdersYes(TT);
+  const yesTot = h[0]?h[0].tot:0, noTot = h[1]?h[1].tot:0;
+  log('而家 holders：Yes 組 '+(h[0]?h[0].n+' 名，'+yesTot.toFixed(2)+' 股':'無數據')+'；No 組 '+(h[1]?h[1].n+' 名，'+noTot.toFixed(2)+' 股':'無數據'));
+  log('對照：鏈上終身淨 '+net.toFixed(2)+' 股 vs holders Yes 總數 '+yesTot.toFixed(2)+' 股，誤差 '+(net-yesTot).toFixed(2)+' 股（'+(yesTot?((net-yesTot)/yesTot*100).toFixed(2)+'%':'n/a')+'）', Math.abs(net-yesTot)/Math.max(yesTot,1)<0.03?'ok':'warn');
+  if(Math.abs(net-yesTot)/Math.max(yesTot,1)<0.03) log('✓ 終身對照通過：鏈上 logs 計出嘅總 OI 同 holders 總數吻合，方法證實可用','ok');
+  else log('✗ 終身對照唔吻合','bad');
+  log('--- 完成 ---');
+})();
+</script>
+</body></html>
